@@ -27,10 +27,14 @@ import supervisely as sly
 import supervisely_pointcloud as spc
 
 from src.labels import ClassLabel, FigurePlan, class_counts, plan_figures
+from src.resources import cells_need, check_cells_memory, memory_limit
 from src.settings import FORMATS
 
 REQUEST_TIMEOUT = (30, 600)
-READ_ATTEMPTS = 5
+# Retries of a read span an API restart: dropped connections, 429 and 5xx answers are retried 1, 2, 4, … 30 s apart
+# for up to 10 minutes.
+RETRY_SECONDS = 600
+RETRY_MAX_DELAY = 30
 CELL_DOWNLOADS = 8
 CONTENT_RANGE = re.compile(r"bytes (\d+)-(\d+)/\d+")
 FILE_NAME = re.compile(r"^[A-Za-z0-9._-]+$")
@@ -56,18 +60,22 @@ def api_url(api: sly.Api, path: str) -> str:
 
 
 def get(session: requests.Session, url: str, what: str, headers: Optional[dict] = None) -> requests.Response:
-    """GET with retries of dropped connections and server errors (1, 2, 4, 8 s apart)."""
-    for attempt in range(READ_ATTEMPTS):
+    """GET, retrying dropped connections, 429 and server errors with backoff for up to `RETRY_SECONDS`."""
+    deadline = time.monotonic() + RETRY_SECONDS
+    delay = 1.0
+    while True:
         try:
             response = session.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
-            if response.status_code < 500:
+            if response.status_code < 500 and response.status_code != 429:
                 break
             error = f"HTTP {response.status_code}"
         except requests.RequestException as e:
             error = str(e)
-        if attempt == READ_ATTEMPTS - 1:
-            raise ExportError(f"Reading {what} failed: {error}")
-        time.sleep(2**attempt)
+        if time.monotonic() + delay > deadline:
+            raise ExportError(f"Reading {what} failed for {RETRY_SECONDS // 60} minutes, last: {error}")
+        sly.logger.warning(f"Reading {what} failed ({error}); retrying in {delay:.0f} s")
+        time.sleep(delay)
+        delay = min(delay * 2, RETRY_MAX_DELAY)
     if response.status_code >= 400:
         try:
             details = response.json()
@@ -137,7 +145,8 @@ class Result:
 
 def run_engine(job: Callable[[spc.CancelToken], Dict[str, Any]]) -> Dict[str, Any]:
     """Runs an engine call in a worker thread so that a stop request (SIGTERM / SIGINT, delivered to the main thread)
-    cancels it: the engine then removes its partial output."""
+    cancels it: the engine then removes its partial output. A Docker agent's Stop kills the process outright instead,
+    so no cancel runs there and the partial file stays in the task's folder."""
     token = spc.CancelToken()
     previous = {}
 
@@ -194,6 +203,14 @@ def export_cloud(
         if not isinstance(revision, str) or not FILE_NAME.match(revision):
             raise ExportError(f'Point cloud "{cloud.name}" has no tree revision')
         plan = plan_figures(annotation, labels, revision)
+        need = cells_need(f.file for f in plan.figures)
+        limit = memory_limit()
+        sly.logger.info(
+            f"{cloud.name}: {len(plan.figures)} figures, {need.figures} cell files, {need.cells:,} cells "
+            f"(~{need.bytes / 2**20:,.0f} MiB once read); the task may use "
+            + (f"{limit / 2**30:.1f} GiB" if limit else "an unknown amount of memory")
+        )
+        check_cells_memory(cloud.name, need, limit)
         cells = download_cells(api, cloud.id, revision, [f.file for f in plan.figures])
         figures = [{"cells": cells[f.file["hash"]], "class": f.index, "instance": f.instance} for f in plan.figures]
         served = ServedArtifacts(api, cloud.id, revision)

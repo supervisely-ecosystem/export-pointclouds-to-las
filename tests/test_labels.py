@@ -4,7 +4,16 @@ from types import SimpleNamespace as NS
 
 import pytest
 
-from src.labels import LabelError, class_counts, class_labels, is_semantic, parse_overrides, plan_figures
+from src.labels import (
+    LabelError,
+    class_counts,
+    class_labels,
+    is_semantic,
+    mapping_warnings,
+    parse_description,
+    parse_overrides,
+    plan_figures,
+)
 from src.settings import Settings
 
 REVISION = "a" * 64
@@ -28,16 +37,66 @@ def test_overrides_lines_json_and_errors():
             parse_overrides(bad)
 
 
+@pytest.mark.parametrize(
+    "description, parsed",
+    [
+        # The trial project's descriptions.
+        ("3 · instance: one object per instance", (3, "instance")),
+        ("1 · semantic: one object per cloud", (1, "semantic")),
+        ("24 · instance: one object per instance", (24, "instance")),
+        ("0·semantic", (0, "semantic")),
+        ("3 • Instance", (3, "instance")),
+        ("3 ∙ semantic", (3, "semantic")),
+        ("3 - semantic: floor", (3, "semantic")),
+        ("3. instance", (3, "instance")),
+        ("  12 –  semantic", (12, "semantic")),
+        ("300 · instance", (300, "instance")),
+        ("semantic: one object per cloud", (None, "semantic")),
+        # The kind is the first word after the index only.
+        ("3 · instance (not semantic)", (3, "instance")),
+        ("3 · walls, semantic", (3, None)),
+        ("semantics of the floor", (None, None)),
+        # A number that is part of the text is no index.
+        ("3-axis rack", (None, None)),
+        ("3.5 m beams", (None, None)),
+        ("3 racks", (None, None)),
+        ("", (None, None)),
+        (None, (None, None)),
+    ],
+)
+def test_description_index_and_kind(description, parsed):
+    assert parse_description(description) == parsed
+
+
 def test_semantic_flag_wins_over_the_description():
     assert is_semantic({"isSemantic": True}, "3 · instance")
     assert not is_semantic({"isSemantic": False}, "1 · semantic: one object per cloud")
     assert is_semantic({}, "1 · Semantic: one object per cloud")
     assert is_semantic(None, "semantic")
     assert not is_semantic({}, "3 · instance: one object per instance")
-    assert not is_semantic({}, "semantics-free")
+    assert not is_semantic({}, "3 · instance (not semantic)")
+    assert not is_semantic({"isSemantic": "true"}, "")
 
 
-def test_class_indices_from_descriptions_order_and_overrides():
+def test_the_trial_class_list():
+    semantic = {"floor", "wall", "roof", "roof beam", "floor marker", "conveyor"}
+    names = [
+        "floor", "wall", "wall column", "wall beam", "roof", "roof beam", "column", "gate", "door", "shelf",
+        "shelf pillar", "shelf beam", "shelf support bar", "shelf support decking", "shelf guard", "safety guard",
+        "safety fencing", "floor marker", "conveyor", "reflector", "pallet", "cage box", "ibc tank", "vehicle",
+    ]
+    classes = [
+        cls(100 + i, name, f"{i} · semantic: one object per cloud" if name in semantic else f"{i} · instance: one object per instance")
+        for i, name in enumerate(names, start=1)
+    ]
+    labels = class_labels(classes + [cls(1, "work unit", shape="cuboid_3d", settings={"isArea": True})], {})
+    assert [(l.name, l.index, l.semantic, l.source) for l in labels.values()] == [
+        (name, i, name in semantic, "description") for i, name in enumerate(names, start=1)
+    ]
+    assert mapping_warnings(labels) == []
+
+
+def test_indices_from_overrides_descriptions_and_order():
     classes = [
         cls(1, "floor", "1 · semantic: one object per cloud"),
         cls(2, "rack"),
@@ -59,13 +118,39 @@ def test_class_indices_from_descriptions_order_and_overrides():
         "any": (6, False, "order"),
         "wall": (2, True, "description"),
     }
-    labels = class_labels(classes, {"pallet": 7, "rack": 0})
-    assert labels[3].index == 7 and labels[3].source == "override"
-    assert labels[2].index == 0
+    [warning] = mapping_warnings(labels)
+    assert '"rack" = 4, "cart" = 5, "any" = 6' in warning
+
+    # An override takes its index away from the order numbering, and replaces the class's own description index.
+    labels = class_labels(classes, {"pallet": 7, "cart": 4})
+    got = {l.name: (l.index, l.source) for l in labels.values()}
+    assert got["pallet"] == (7, "override") and got["cart"] == (4, "override")
+    assert got["rack"] == (5, "order") and got["any"] == (6, "order")
+    assert mapping_warnings(class_labels([cls(1, "a"), cls(2, "b")], {})) == []
+
     with pytest.raises(LabelError, match="work unit"):
         class_labels(classes, {"work unit": 9})
     with pytest.raises(LabelError, match="More than 255"):
         class_labels([cls(i, f"c{i}") for i in range(1, 300)], {})
+
+
+def test_shared_indices_are_refused_unless_every_class_is_overridden():
+    with pytest.raises(LabelError, match=r'3: "a" \(description\), "b" \(description\)'):
+        class_labels([cls(1, "a", "3 · instance"), cls(2, "b", "3 · semantic")], {})
+    with pytest.raises(LabelError, match=r'3: "a" \(description\), "b" \(override\)'):
+        class_labels([cls(1, "a", "3 · instance"), cls(2, "b")], {"b": 3})
+    # The order numbering never hands out an index that an override or a description holds.
+    labels = class_labels([cls(1, "a"), cls(2, "b")], {"b": 1})
+    assert {l.name: l.index for l in labels.values()} == {"a": 2, "b": 1}
+    # Classes merged on purpose: each of them overridden.
+    labels = class_labels([cls(1, "a", "3 · instance"), cls(2, "b")], {"a": 5, "b": 5})
+    assert {l.name: l.index for l in labels.values()} == {"a": 5, "b": 5}
+
+
+def test_a_description_index_above_255_is_refused_unless_overridden():
+    with pytest.raises(LabelError, match='"tall" starts with 300'):
+        class_labels([cls(1, "tall", "300 · instance")], {})
+    assert class_labels([cls(1, "tall", "300 · instance")], {"tall": 30})[1].index == 30
 
 
 def obj(id, class_id, created, updated=None):
@@ -84,7 +169,7 @@ def octree(id, object_id, updated, revision=REVISION, digest=None):
     }
 
 
-def test_plan_orders_by_last_update_and_numbers_instances_by_creation():
+def test_plan_orders_by_figure_update_and_numbers_instances_by_object_creation():
     labels = class_labels([cls(1, "floor", "1 · semantic"), cls(2, "pallet", "21 · instance"), cls(3, "area", shape="cuboid_3d")], {})
     annotation = {
         "objects": [
@@ -93,7 +178,7 @@ def test_plan_orders_by_last_update_and_numbers_instances_by_creation():
             obj(11, 2, "2026-01-01T00:00:01.000Z"),
             obj(12, 1, "2026-01-01T00:00:02.000Z"),
             obj(13, 1, "2026-01-01T00:00:04.000Z"),
-            # Its own update comes after every figure's: it wins over the figures updated before.
+            # Updated after every figure (a tag, say): its figure keeps its own place.
             obj(14, 2, "2026-01-01T00:00:05.000Z", "2026-01-01T00:01:00.000Z"),
             obj(15, 3, "2026-01-01T00:00:06.000Z"),
         ],
@@ -106,12 +191,13 @@ def test_plan_orders_by_last_update_and_numbers_instances_by_creation():
             octree(105, 10, "2026-01-01T00:00:15.000Z"),
             octree(106, 15, "2026-01-01T00:00:50.000Z"),
             octree(107, 11, "2026-01-01T00:00:50.000Z", revision="b" * 64),
+            {**octree(110, 11, "2026-01-01T00:00:50.000Z"), "geometry": {"version": 2, "treeRevision": REVISION}},
             {"id": 108, "objectId": 11, "geometryType": "cuboid_3d", "updatedAt": "2026-01-01T00:00:50.000Z"},
             {**octree(109, 13, "2026-01-01T00:00:40.000Z"), "id": 99},
         ],
     }
     plan = plan_figures(annotation, labels, REVISION)
-    assert [f.figure_id for f in plan.figures] == [101, 105, 102, 100, 99, 103, 104]
+    assert [f.figure_id for f in plan.figures] == [104, 101, 105, 102, 100, 99, 103]
     assert {f.figure_id: (f.index, f.instance) for f in plan.figures} == {
         101: (21, 1),
         105: (21, 2),
@@ -121,8 +207,12 @@ def test_plan_orders_by_last_update_and_numbers_instances_by_creation():
         103: (1, 0),
         104: (21, 3),
     }
-    assert plan.figures[0].file["hash"] == f"{101:064x}"
-    assert plan.skipped == {"class is not a point cloud class": 1, "labels another tree revision of the point cloud": 1}
+    assert plan.figures[1].file["hash"] == f"{101:064x}"
+    assert plan.skipped == {
+        "class is not a point cloud class": 1,
+        "labels another tree revision of the point cloud": 1,
+        "has no cell file": 1,
+    }
 
 
 def test_plan_of_a_cloud_file_takes_its_point_indices():
@@ -142,7 +232,7 @@ def test_plan_of_a_cloud_file_takes_its_point_indices():
 
 
 def test_class_counts_names_each_index():
-    labels = class_labels([cls(1, "floor", "1 · semantic"), cls(2, "ground", "1 · semantic"), cls(3, "pallet")], {})
+    labels = class_labels([cls(1, "floor", "1 · semantic"), cls(2, "ground"), cls(3, "pallet")], {"floor": 1, "ground": 1})
     counts = class_counts([{"class": 0, "points": 5}, {"class": 1, "points": 7}, {"class": 2, "points": 1}], labels)
     assert counts == [
         {"class": 0, "names": ["unlabeled"], "points": 5},

@@ -17,7 +17,7 @@ from dotenv import load_dotenv
 
 import src.workflow as w
 from src.export import describe, export_cloud
-from src.labels import class_labels
+from src.labels import class_labels, mapping_warnings
 from src.settings import Settings
 
 RESULT_DIR_NAME = "Export point clouds to LAS"
@@ -62,8 +62,9 @@ def log_result(entry: dict) -> None:
     sly.logger.info(
         f"{entry['name']}: {entry['points']:,} points written to {entry['file']} ({entry['size'] / 2**30:.2f} GiB) "
         f"in {entry['seconds']} s; {entry['labeledPoints']:,} labelled, {entry['unlabeledPoints']:,} unlabelled, "
-        f"{entry['overlapPoints']:,} in several objects (the most recently updated wins)",
-        extra={"report": entry},
+        f"{entry['overlapPoints']:,} in several objects (the figure updated last wins)",
+        # The per-object counts can run to thousands of entries: they stay in report.json.
+        extra={"report": {k: v for k, v in entry.items() if k != "objects"}},
     )
     for c in entry["classes"]:
         sly.logger.info(f"  class {c['class']} ({', '.join(c['names']) or 'no class'}): {c['points']:,} points")
@@ -104,6 +105,8 @@ def main() -> None:
     if not labels:
         sly.logger.warning("The project has no point cloud classes: every point is written unlabelled (class 0)")
     log_classes(labels)
+    for warning in mapping_warnings(labels):
+        sly.logger.warning(warning)
 
     work_dir = Path(sly.app.get_data_dir())
     work_dir.mkdir(parents=True, exist_ok=True)
@@ -122,11 +125,13 @@ def main() -> None:
             if local.exists():
                 local.unlink()
             sly.logger.info(f"Exporting {ds_path}/{cloud.name} (id {cloud.id})")
-            result = export_cloud(api, cloud, labels, settings.format, local, work_dir)
-            entry = {"dataset": ds_path, **describe(result, labels, cloud)}
-            log_result(entry)
-            info = upload(api, team_id, local, f"{remote_root}{ds_path}/{name}")
-            local.unlink()
+            try:
+                result = export_cloud(api, cloud, labels, settings.format, local, work_dir)
+                entry = {"dataset": ds_path, **describe(result, labels, cloud)}
+                log_result(entry)
+                info = upload(api, team_id, local, f"{remote_root}{ds_path}/{name}")
+            finally:
+                local.unlink(missing_ok=True)
             entry["teamFilesPath"] = info.path
             reports.append(entry)
             uploaded.append(info)

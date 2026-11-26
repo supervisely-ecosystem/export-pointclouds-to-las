@@ -5,10 +5,11 @@ import shutil
 from pathlib import Path
 from types import SimpleNamespace as NS
 
-import numpy as np
 import pytest
 
 spc = pytest.importorskip("supervisely_pointcloud")
+
+import numpy as np  # noqa: E402
 
 from src.export import describe, export_cloud  # noqa: E402
 from src.labels import class_labels  # noqa: E402

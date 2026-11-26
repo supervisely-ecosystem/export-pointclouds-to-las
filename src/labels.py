@@ -6,16 +6,17 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 # Classes whose objects label points: point cloud segmentation, and "any shape" classes, which may hold them too.
 POINT_SHAPES = ("point_cloud", "any")
 OCTREE = "point_cloud_octree"
 INDICES = "point_cloud"
-# "3 · instance: one object per instance": the index a class description starts with.
-DESCRIPTION_INDEX = re.compile(r"^\s*(\d{1,3})\s*[·•]")
+# "3 · instance: one object per instance": the index a class description starts with, then a separator (`·`, `•`, `∙`,
+# or `-` / `.` before a space, so that "3-axis" and "3.5 m" are no index), then optionally the class kind.
+DESCRIPTION_INDEX = re.compile(r"^\s*(\d+)\s*(?:[·•∙]|[.\-–](?=\s))\s*")
+KIND = re.compile(r"(semantic|instance)\b", re.IGNORECASE)
 SEMANTIC_SETTING = "isSemantic"
-SEMANTIC_WORD = re.compile(r"\bsemantic\b", re.IGNORECASE)
 MAX_INDEX = 255
 UNLABELED = 0
 
@@ -70,19 +71,29 @@ def parse_overrides(text: Optional[str]) -> Dict[str, int]:
     return overrides
 
 
+def parse_description(description: Optional[str]) -> Tuple[Optional[int], Optional[str]]:
+    """`(index, kind)` of a class description: the number it starts with (`3 · …`, `3 - …`, `3. …`), and `semantic` or
+    `instance` when that is the first word after it (or the description's first word without an index)."""
+    text = description or ""
+    match = DESCRIPTION_INDEX.match(text)
+    kind = KIND.match(text[match.end():] if match else text.lstrip())
+    return int(match.group(1)) if match else None, kind.group(1).lower() if kind else None
+
+
 def is_semantic(settings: Optional[Mapping[str, Any]], description: Optional[str]) -> bool:
-    """The class flag `settings.isSemantic` when the class has one, else whether its description says `semantic`."""
+    """The class flag `settings.isSemantic` when the class has one, else whether its description names the class
+    `semantic` (`1 · semantic: one object per cloud`)."""
     flag = (settings or {}).get(SEMANTIC_SETTING)
     if isinstance(flag, bool):
         return flag
-    return bool(SEMANTIC_WORD.search(description or ""))
+    return parse_description(description)[1] == "semantic"
 
 
 def class_labels(classes: Sequence[Any], overrides: Mapping[str, int]) -> Dict[int, ClassLabel]:
     """The label of every point cloud class of a project (`classes` as `api.object_class.get_list` returns them,
-    in the project's order). A class whose description starts with `N ·` gets N; the others get 1, 2, … in the
-    project's order, skipping indices taken that way (0 stays the unlabeled points'); `overrides` (by class name)
-    win over both."""
+    in the project's order). `overrides` (by class name) come first, then the index a description starts with; the
+    other classes get the free indices 1, 2, … in the project's order (0 stays the unlabeled points'). Two classes
+    may share an index only when both got it from `overrides`: otherwise their points could not be told apart."""
     pointish = [c for c in classes if c.shape in POINT_SHAPES]
     names = {c.name for c in pointish}
     unknown = sorted(set(overrides) - names)
@@ -91,20 +102,26 @@ def class_labels(classes: Sequence[Any], overrides: Mapping[str, int]) -> Dict[i
             f"Class indices name classes the project has no point cloud class of: {', '.join(unknown)} "
             f"(it has: {', '.join(sorted(names)) or 'none'})"
         )
-    described = {}
+    fixed: Dict[int, Tuple[int, str]] = {}
     for c in pointish:
-        match = DESCRIPTION_INDEX.match(c.description or "")
-        if match and int(match.group(1)) <= MAX_INDEX:
-            described[c.id] = int(match.group(1))
-    taken = set(described.values()) | {UNLABELED}
+        if c.name in overrides:
+            fixed[c.id] = (overrides[c.name], "override")
+        else:
+            index = parse_description(c.description)[0]
+            if index is not None and index > MAX_INDEX:
+                raise LabelError(
+                    f'The description of class "{c.name}" starts with {index}, more than the {MAX_INDEX} a LAS class '
+                    f'holds: change it, or set the class\'s index in the modal'
+                )
+            if index is not None:
+                fixed[c.id] = (index, "description")
+    taken = {index for index, _ in fixed.values()} | {UNLABELED}
     labels = {}
     next_index = 1
     for c in pointish:
         semantic = is_semantic(getattr(c, "settings", None), c.description)
-        if c.name in overrides:
-            index, source = overrides[c.name], "override"
-        elif c.id in described:
-            index, source = described[c.id], "description"
+        if c.id in fixed:
+            index, source = fixed[c.id]
         else:
             while next_index in taken:
                 next_index += 1
@@ -113,7 +130,38 @@ def class_labels(classes: Sequence[Any], overrides: Mapping[str, int]) -> Dict[i
             index, source = next_index, "order"
             taken.add(index)
         labels[c.id] = ClassLabel(c.id, c.name, index, semantic, source)
+
+    by_index: Dict[int, List[ClassLabel]] = {}
+    for label in labels.values():
+        by_index.setdefault(label.index, []).append(label)
+    clashes = [
+        f"{index}: " + ", ".join(f'"{l.name}" ({l.source})' for l in group)
+        for index, group in sorted(by_index.items())
+        if len(group) > 1 and any(l.source != "override" for l in group)
+    ]
+    if clashes:
+        raise LabelError(
+            "Classes would share a classification index, so their points could not be told apart: "
+            + "; ".join(clashes)
+            + ". Give them different indices in their descriptions or in the modal's class indices "
+            "(classes merged on purpose: list each of them there)"
+        )
     return labels
+
+
+def mapping_warnings(labels: Mapping[int, ClassLabel]) -> List[str]:
+    """What may be unintended in a valid mapping: indices numbered by the project's order next to indices from
+    descriptions (the numbered ones change when classes are added or reordered)."""
+    sources = {l.source for l in labels.values()}
+    if "order" in sources and "description" in sources:
+        ordered = sorted((l for l in labels.values() if l.source == "order"), key=lambda l: l.index)
+        listed = ", ".join(f'"{l.name}" = {l.index}' for l in ordered)
+        return [
+            f"Some classes have an index in their description and these have none, so they got the next free "
+            f"indices in the project's order: {listed}. Set them in the class descriptions or the modal if their "
+            f"numbers matter"
+        ]
+    return []
 
 
 @dataclass
@@ -138,10 +186,11 @@ class FigurePlan:
 def plan_figures(annotation: Mapping[str, Any], labels: Mapping[int, ClassLabel], tree_revision: Optional[str]) -> FigurePlan:
     """The figures of a point cloud's annotation (`api.pointcloud.annotation.download`) that label its points, in
     priority order, each with its class index and instance: 0 for a semantic class, else 1, 2, … per class in the
-    order the objects were created. The engine lets the last figure holding a point win, so the figures go least
-    recently updated first, by the later of the figure's and its object's `updatedAt`: of the objects holding a point,
-    the one updated last labels it. `tree_revision`: the streamed cloud's tree (its `point_cloud_octree` figures label
-    it); `None` for a cloud file (its `point_cloud` figures do)."""
+    order the objects holding figures of this cloud were created (dense: removing an object renumbers the later ones;
+    the report maps the numbers to object ids). The engine lets the last figure holding a point win, so the figures
+    go least recently updated first, by the figure's own `updatedAt` (an edit of the object, such as a tag, does not
+    reorder them). `tree_revision`: the streamed cloud's tree (its `point_cloud_octree` figures label it); `None` for
+    a cloud file (its `point_cloud` figures do)."""
     objects = {o["id"]: o for o in annotation.get("objects") or []}
     kind = OCTREE if tree_revision is not None else INDICES
     skipped: Dict[str, int] = {}
@@ -161,7 +210,10 @@ def plan_figures(annotation: Mapping[str, Any], labels: Mapping[int, ClassLabel]
             continue
         if kind == OCTREE:
             file = geometry.get("file") or {}
-            if geometry.get("treeRevision") != tree_revision or not file.get("hash"):
+            if not file.get("hash"):
+                skip("has no cell file")
+                continue
+            if geometry.get("treeRevision") != tree_revision:
                 skip("labels another tree revision of the point cloud")
                 continue
         elif not geometry.get("indices"):
@@ -186,7 +238,7 @@ def plan_figures(annotation: Mapping[str, Any], labels: Mapping[int, ClassLabel]
             per_class[class_id] = per_class.get(class_id, 0) + 1
             instances[object_id] = per_class[class_id]
 
-    kept.sort(key=lambda item: (max(item[0].get("updatedAt") or "", item[1].get("updatedAt") or ""), item[0]["id"]))
+    kept.sort(key=lambda item: (item[0].get("updatedAt") or "", item[0]["id"]))
     planned = []
     for figure, _, class_id in kept:
         object_id = figure.get("objectId") or -figure["id"]
