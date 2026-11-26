@@ -82,7 +82,8 @@ the file size and the time it took.
 **Object number** (`instance_id`):
 
 - **semantic classes** (one object per class however often drawn, e.g. floor or wall): 0 for every point. A class is
-  semantic when it is marked as such, or when its description says `semantic`;
+  semantic when its **Semantic** setting is on (on Supervisely versions that have it), else when its description says
+  `semantic`, for example `1 · semantic: one object per cloud`;
 - **other classes**: 1, 2, 3, … per class, in the order the objects were created.
 
 **Points in several objects**: the object updated last wins (the later of its own update and its figure's), so a
