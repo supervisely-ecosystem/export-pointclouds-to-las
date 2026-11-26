@@ -1,0 +1,20 @@
+name: Image check
+run-name: Image check of "${{ github.ref_name }}"
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - master
+permissions:
+  contents: read
+jobs:
+  # config.json names an image of the app (supervisely/export-pointclouds-to-las:<SDK of dev_requirements.txt>-<release>),
+  # and docker/Dockerfile.tmpl runs the app from /app/repo with config.json's main_script as its CMD.
+  Check-Image:
+    runs-on: gha-runner-supervisely-ecosystem
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - run: python3 docker/check_image.py
