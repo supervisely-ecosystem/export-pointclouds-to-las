@@ -1,0 +1,135 @@
+# Image of the LAS / LAZ / PLY export (../config.json), built by the shared build_image_from_template.yml workflow:
+# release.yml builds the image of each release, build_image_from_template.yml test images by hand.
+#
+# Every release has its own image: release vX.Y.Z runs on supervisely/export-pointclouds-to-las:<SDK>-X.Y.Z (the
+# Supervisely SDK of dev_requirements.txt, then the release), built from the release's commit, which config.json
+# names (docker/check_image.py checks it on each pull request and before the release builds anything). The image
+# carries the app (src/ and config.json) in /app/repo, where the platform runs it, so one digest holds the code and
+# everything it runs on, and `docker run` starts the app outside the platform too (config.json's main_script is the
+# CMD; the export's settings come from the environment, as on the platform). A task still runs the copy of the
+# release the agent downloads and mounts over /app, which is the same code.
+ARG tag_ref_name
+ARG REQUIREMENTS_FILE=dev_requirements.txt
+ARG RUNTIME_BASE_IMAGE=base-py-sdk-hardened
+ARG EXTRA_BUILDER_LIBS=""
+# The platform's point cloud engine, as the stripped supervisely_pointcloud wheel that supervisely/main builds from
+# shared/tools/pointcloud and publishes as a private scratch image holding only /wheels/ (0.9.0: export_points).
+# Pinned by digest; the build needs pull access to the private Docker Hub repository, and no engine source is
+# involved.
+ARG BINDINGS_IMAGE=docker.io/supervisely/sly-pointcloud-python-bindings:0.9.0@sha256:679b2bc84b2d1dd8b00f12d58b12d6e0d0ed0db591050f22f77f2e67e4177c34
+# python:3.12-slim-bookworm as Docker Hub served it from 2026-11-05 to 2026-11-24 (Python 3.12.16, Debian bookworm
+# of 2026-11-04), the base of supervisely/main-import too. Pinned by digest so that a rebuild is the same image
+# (Docker Hub re-pushes the tag); move it on purpose.
+ARG PYTHON_IMAGE=python:3.12-slim-bookworm@sha256:935c3c5b12357a7e10caa9c1e6ca5692344d97cf229832ef584be2cec9fc03df
+
+FROM ${BINDINGS_IMAGE} AS bindings
+
+FROM ${PYTHON_IMAGE} AS requirements-builder
+
+ENV LANG=C.UTF-8 \
+  PYTHONDONTWRITEBYTECODE=1 \
+  PYTHONUNBUFFERED=1 \
+  PIP_DISABLE_PIP_VERSION_CHECK=1 \
+  PIP_NO_CACHE_DIR=1 \
+  PIP_PREFER_BINARY=1
+
+ARG REQUIREMENTS_FILE
+ARG EXTRA_BUILDER_LIBS
+RUN set -eux; \
+  apt-get update; \
+  apt-get install -y --no-install-recommends \
+    build-essential \
+    ca-certificates \
+    git \
+    pkg-config \
+    ${EXTRA_BUILDER_LIBS}; \
+  rm -rf /var/lib/apt/lists/*
+
+COPY ${REQUIREMENTS_FILE} /tmp/requirements.txt
+
+RUN set -eux; \
+  python -m venv /opt/venv; \
+  /opt/venv/bin/python -m ensurepip --upgrade; \
+  /opt/venv/bin/python -m pip install --no-cache-dir --upgrade pip wheel setuptools; \
+  /opt/venv/bin/python -m pip wheel --no-cache-dir -r /tmp/requirements.txt -w /tmp/wheels
+
+FROM ${PYTHON_IMAGE} AS runtime
+
+ENV LANG=C.UTF-8 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+ARG REQUIREMENTS_FILE
+
+COPY ${REQUIREMENTS_FILE} /tmp/requirements.txt
+
+ARG CACHEBUST=""
+
+# The private `bindings` stage is only bind-mounted, never copied or used as a base: the build cache is exported
+# with mode=max, which would carry the layers of any stage that produces one. The wheel's software bill of
+# materials (it names the build tree) is not installed.
+RUN --mount=from=requirements-builder,source=/tmp/wheels,target=/tmp/wheels,ro \
+  --mount=from=bindings,source=/wheels,target=/tmp/bindings,ro \
+  set -eux; \
+  ln -sf /usr/local/bin/python3 /usr/local/bin/python; \
+  ln -sf /usr/local/bin/python3 /usr/bin/python; \
+  apt-get update; \
+  apt-get install -y --no-install-recommends \
+    libglib2.0-0 \
+    libgl1 \
+    libmagic1 \
+    libsm6 \
+    libxrender1 \
+    libxext6; \
+  python -m venv /opt/venv; \
+  /opt/venv/bin/python -m ensurepip --upgrade; \
+  /opt/venv/bin/python -m pip install --no-cache-dir --no-compile --no-index /tmp/wheels/*.whl /tmp/bindings/*.whl; \
+  rm -rf /opt/venv/lib/python*/site-packages/supervisely_pointcloud-*.dist-info/sboms; \
+  /opt/venv/bin/python -c "import supervisely, supervisely_pointcloud as spc; assert spc.__version__ == '0.9.0', spc.__version__"; \
+  rm -rf \
+    /opt/venv/lib/python*/site-packages/pip* \
+    /opt/venv/lib/python*/site-packages/setuptools* \
+    /opt/venv/lib/python*/site-packages/wheel* \
+    /opt/venv/lib/python*/site-packages/pkg_resources* \
+    /opt/venv/lib/python*/site-packages/_distutils_hack* \
+    /opt/venv/lib/python*/site-packages/_distutils* \
+    /opt/venv/lib/python*/site-packages/distutils-precedence.pth \
+    /opt/venv/bin/pip \
+    /opt/venv/bin/pip3 \
+    /opt/venv/bin/pip3.* \
+    /opt/venv/bin/easy_install \
+    /opt/venv/bin/easy_install-* \
+    /opt/venv/bin/wheel; \
+  rm -rf \
+    /var/lib/apt/lists/* \
+    /usr/bin/apt \
+    /usr/bin/apt-get \
+    /usr/bin/apt-cache \
+    /usr/bin/apt-mark \
+    /usr/bin/apt-key \
+    /usr/bin/dpkg \
+    /usr/bin/dpkg-deb \
+    /usr/bin/dpkg-query \
+    /usr/bin/dpkg-divert \
+    /usr/local/lib/python3.12/site-packages/pip* \
+    /usr/local/lib/python3.12/site-packages/setuptools* \
+    /usr/local/lib/python3.12/site-packages/wheel* \
+    /usr/local/lib/python3.12/site-packages/pkg_resources* \
+    /usr/local/lib/python3.12/site-packages/_distutils* \
+    /usr/local/lib/python3.12/site-packages/distutils-precedence.pth; \
+  find /opt/venv -type d -name '__pycache__' -prune -exec rm -rf {} +; \
+  find /opt/venv -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete; \
+  find /opt/venv/lib/python*/site-packages -type d \( -name 'tests' -o -name 'test' \) -prune -exec rm -rf {} +; \
+  rm -rf /tmp/requirements.txt
+
+ENV PATH="/opt/venv/bin:$PATH"
+
+# The app, last, so that a release that changes only code reuses every layer above and adds these small ones: src/,
+# then config.json, which names this image and so changes with every release. main_script runs with /app/repo on the
+# Python path, as the agents run it. Dockerfile.tmpl.dockerignore lets only these and dev_requirements.txt into the
+# build context: no tests, local.env or other developer files.
+COPY src/ /app/repo/src/
+COPY config.json /app/repo/
+WORKDIR /app/repo
+ENV PYTHONPATH=/app/repo
+CMD ["python", "src/main.py"]

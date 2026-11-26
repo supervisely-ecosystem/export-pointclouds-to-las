@@ -1,0 +1,21 @@
+<div>
+    <sly-field title="Format"
+               description="One file per point cloud with every point: its class in classification, its object in instance_id">
+        <div class="fflex" style="flex-direction: column; align-items: flex-start">
+            <el-radio class="radio" v-model="state.format" label="laz">
+                LAZ: compressed LAS 1.4
+            </el-radio>
+            <el-radio class="radio" v-model="state.format" label="las" style="margin-left: 0;">
+                LAS 1.4: uncompressed, several times larger than LAZ
+            </el-radio>
+            <el-radio class="radio" v-model="state.format" label="ply" style="margin-left: 0;">
+                PLY: binary, the same fields as vertex properties
+            </el-radio>
+        </div>
+    </sly-field>
+    <sly-field title="Class indices (optional)"
+               description="The classification of a class: one 'class name: index' (0-255) per line. Without it a class gets the number its description starts with ('3 · ...'), else the next free number in the project's order; 0 is the unlabeled points">
+        <el-input type="textarea" :rows="4" v-model="state.classIndices"
+                  placeholder="pallet: 21&#10;floor marker: 18"></el-input>
+    </sly-field>
+</div>

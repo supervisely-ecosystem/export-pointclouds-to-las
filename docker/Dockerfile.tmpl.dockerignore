@@ -1,0 +1,9 @@
+# The build context of docker/Dockerfile.tmpl: the requirements the build installs and the app the image carries
+# (src/ and config.json). Nothing else: no tests, docs, local.env or other developer files.
+*
+!dev_requirements.txt
+!config.json
+!src/
+src/tests/
+**/__pycache__/
+**/*.pyc
