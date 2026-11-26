@@ -1,0 +1,23 @@
+name: Tests
+run-name: Tests of "${{ github.ref_name }}"
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - master
+permissions:
+  contents: read
+jobs:
+  # The pure-Python tests (class mapping, figure priority, settings, memory bound). tests/test_export.py needs the
+  # private engine and is skipped here. A GitHub-hosted runner: pull requests from forks run here.
+  Tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - run: |
+          python3 -m venv /tmp/venv
+          /tmp/venv/bin/python -m pip install --quiet pytest==9.2.0
+          /tmp/venv/bin/python -m pytest tests -q -p no:cacheprovider

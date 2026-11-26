@@ -76,25 +76,41 @@ the file size and the time it took.
 **Class index** (`classification`, 0–255; 0 is the unlabeled points):
 
 1. the index given in the modal window, one `class name: index` per line, for example `pallet: 21`;
-2. else the number the class description starts with, for example `21 · instance: one object per instance`;
-3. else the next free number in the order of the project's classes, from 1.
+2. else the number the class description starts with, followed by `·`, `•`, `∙`, `-` or `.`, for example
+   `21 · instance: one object per instance` or `21 - pallet` (a number above 255 stops the export);
+3. else the next free number in the order of the project's classes, from 1. When some classes take their index from
+   their description and others from this order, the task log warns: the ordered numbers change when classes are
+   added or reordered.
+
+Two classes never share an index by accident: the export stops and names them. To merge classes on purpose, give
+each of them the same index in the modal.
 
 **Object number** (`instance_id`):
 
 - **semantic classes** (one object per class however often drawn, e.g. floor or wall): 0 for every point. A class is
-  semantic when its **Semantic** setting is on (on Supervisely versions that have it), else when its description says
-  `semantic`, for example `1 · semantic: one object per cloud`;
-- **other classes**: 1, 2, 3, … per class, in the order the objects were created.
+  semantic when its **Semantic** setting is on (on Supervisely versions that have it), else when its description
+  says so in its first word after the index, for example `1 · semantic: one object per cloud`
+  (`3 · instance (not semantic)` is an instance class);
+- **other classes**: 1, 2, 3, … per class and point cloud, in the order the objects were created. The numbers are
+  dense: removing an object renumbers the later ones of its class. `report.json` maps every number to its object id.
 
-**Points in several objects**: the object updated last wins (the later of its own update and its figure's), so a
-point repainted with another class takes that class. The report counts these points.
+**Points in several objects**: the object whose figure was updated last wins, so a point repainted with another class
+takes that class (editing only the object, such as its tags, changes nothing). The report counts these points.
 
 # Notes
 
-- Requires Supervisely 6.19.0 or later.
-- A streamed cloud is read by the user who runs the export, with that user's access to the project.
+- Requires Supervisely 6.19.0 or later. On Supervisely Cloud the export runs on Supervisely's own agents (its image
+  is private).
+- A streamed cloud is read by the user who runs the export, with that user's access to the project. A read that
+  fails (a dropped connection, an API restart) is retried for up to 10 minutes.
 - The file of each point cloud is written to the task's disk before it is uploaded to Team Files: the agent needs
-  free disk of about the output size (LAS is several times larger than LAZ).
+  free disk of about the output size (LAS is several times larger than LAZ). It is removed once uploaded, or when
+  the export or upload fails.
+- The objects of a streamed cloud are held in memory while it is written (8 bytes a cell); the task log shows how
+  many cells they hold, and the export stops with a message before reading them when they would not fit beside the
+  export's own ~2 GB.
+- **Stop** on a Kubernetes agent cancels the export and removes the unfinished file. On a Docker agent, Stop kills
+  the process at once: the unfinished file stays in the task's folder on the agent.
 - Objects saved for another version of a streamed point cloud (re-imported since) do not label it; the task log
   counts them.
 
@@ -103,7 +119,9 @@ point repainted with another class takes that class. The report counts these poi
 - Run locally: put `SERVER_ADDRESS` and `API_TOKEN` in `~/supervisely.env`, set `TEAM_ID`, `WORKSPACE_ID` and
   `PROJECT_ID` (or `DATASET_ID`) in `local.env`, and run `python src/main.py` from the repository root with it on
   `PYTHONPATH`. The point cloud engine (`supervisely_pointcloud`) comes from the app's image; it is not on PyPI.
-- Tests: `python -m pytest tests` (`tests/test_export.py` runs only where `supervisely_pointcloud` is installed).
+- Tests: `python -m pytest tests`; the `Tests` workflow runs them on every pull request (`tests/test_export.py` runs
+  only where `supervisely_pointcloud` is installed, so not there). The workflows pull requests trigger run on
+  GitHub-hosted runners, and pull requests from outside contributors wait for approval.
 - Every release vX.Y.Z runs on its own image, `supervisely/export-pointclouds-to-las:<SDK>-X.Y.Z`, which
   `config.json` names and the Release workflow builds from the release's commit (`docker/Dockerfile.tmpl`; the
   `Image check` workflow runs `docker/check_image.py` on every pull request). To release: set `docker_image` to the

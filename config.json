@@ -1,7 +1,10 @@
 {
   "name": "Export Point Clouds to LAS / LAZ / PLY",
   "type": "app",
-  "categories": ["pointclouds", "export"],
+  "categories": [
+    "pointclouds",
+    "export"
+  ],
   "description": "Every point of each point cloud, at full resolution, with its class and object as one LAS, LAZ or PLY file",
   "docker_image": "supervisely/export-pointclouds-to-las:6.74.62-0.1.0",
   "min_instance_version": "6.19.0",
@@ -14,8 +17,12 @@
   "task_location": "workspace_tasks",
   "isolate": true,
   "headless": true,
+  "community_agent": "only",
   "context_menu": {
-    "target": ["point_cloud_project", "point_cloud_dataset"],
+    "target": [
+      "point_cloud_project",
+      "point_cloud_dataset"
+    ],
     "context_root": "Download as"
   }
 }

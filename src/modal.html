@@ -14,7 +14,7 @@
         </div>
     </sly-field>
     <sly-field title="Class indices (optional)"
-               description="The classification of a class: one 'class name: index' (0-255) per line. Without it a class gets the number its description starts with ('3 · ...'), else the next free number in the project's order; 0 is the unlabeled points">
+               description="The classification of a class: one 'class name: index' (0-255) per line. Without it a class gets the number its description starts with ('3 · ...', '3 - ...'), else the next free number in the project's order; 0 is the unlabeled points">
         <el-input type="textarea" :rows="4" v-model="state.classIndices"
                   placeholder="pallet: 21&#10;floor marker: 18"></el-input>
     </sly-field>
